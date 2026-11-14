@@ -1,0 +1,43 @@
+name: Decompile DLL
+on:
+  push:
+    paths: ['decompile/*.dll']
+  workflow_dispatch:
+    inputs:
+      dll_path:
+        description: 'DLL already in the repo, e.g. decompile/MyMod.dll'
+        required: true
+permissions:
+  contents: read
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Pick DLL
+        env:
+          DLL_INPUT: ${{ github.event.inputs.dll_path }}
+        run: |
+          if [ -n "$DLL_INPUT" ]; then DLL="$DLL_INPUT"
+          else DLL=$(git diff-tree --no-commit-id --name-only --diff-filter=AM -r HEAD -- 'decompile/*.dll' | tail -n1); fi
+          if [ -z "$DLL" ] || [ ! -f "$DLL" ]; then echo "::error::No DLL found"; exit 1; fi
+          echo "DLL=$DLL" >> "$GITHUB_ENV"
+      - name: Install ILSpy CLI
+        run: dotnet tool install -g ilspycmd
+      - name: Decompile to a project
+        run: |
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          BASE=$(basename "$DLL" .dll)
+          mkdir -p "src/$BASE" out
+          ilspycmd -p -o "src/$BASE" "$DLL"
+          (cd src && zip -qr "../out/${BASE}-source.zip" "$BASE")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-source
+          path: out/*.zip
+          if-no-files-found: error

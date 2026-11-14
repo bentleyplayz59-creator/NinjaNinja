@@ -1,0 +1,65 @@
+name: Build Mod
+on:
+  push:
+    paths: ['inbox/*.zip']
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'Source zip already in the repo, e.g. inbox/MyMod.zip'
+        required: true
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            8.0.x
+      - name: Pick source zip
+        env:
+          ZIP_INPUT: ${{ github.event.inputs.zip_path }}
+        run: |
+          if [ -n "$ZIP_INPUT" ]; then ZIP="$ZIP_INPUT"
+          else ZIP=$(git diff-tree --no-commit-id --name-only --diff-filter=AM -r HEAD -- 'inbox/*.zip' | tail -n1); fi
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then echo "::error::No source zip found"; exit 1; fi
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+      - name: Unpack source
+        run: |
+          rm -rf work && mkdir work && unzip -q "$ZIP" -d work
+          CSPROJ=$(find work -name '*.csproj' | head -n1)
+          if [ -z "$CSPROJ" ]; then echo "::error::No .csproj inside the zip"; exit 1; fi
+          echo "CSPROJ=$CSPROJ" >> "$GITHUB_ENV"
+      - name: Add SMAPI build environment
+        uses: Pathoschild/SMAPI-ModBuildWorkflow/add-build-environment@v1
+      - name: Build DLL
+        run: dotnet build "$CSPROJ" -c Release -p:EnableModDeploy=false -p:EnableModZip=true
+      - name: Package mod zip
+        run: |
+          mkdir -p out
+          ZIPOUT=$(find work -path '*/bin/*' -name '*.zip' | head -n1)
+          if [ -n "$ZIPOUT" ]; then
+            cp "$ZIPOUT" out/
+          else
+            DIR=$(dirname "$CSPROJ")
+            BIN=$(find "$DIR/bin/Release" -maxdepth 1 -type d -name 'net*' | head -n1)
+            MANIFEST=$(find "$DIR" -maxdepth 2 -name manifest.json -not -path '*/bin/*' -not -path '*/obj/*' | head -n1)
+            if [ -z "$MANIFEST" ]; then echo "::error::No manifest.json found"; exit 1; fi
+            ENTRY=$(grep -o '"EntryDll"[[:space:]]*:[[:space:]]*"[^"]*"' "$MANIFEST" | sed 's/.*"\([^"]*\)"$/\1/')
+            NAME=$(basename "$DIR")
+            mkdir -p "pack/$NAME"
+            rsync -a --exclude bin --exclude obj --exclude '*.cs' --exclude '*.csproj' "$(dirname "$MANIFEST")"/ "pack/$NAME/"
+            cp "$BIN/$ENTRY" "pack/$NAME/"
+            (cd pack && zip -qr "../out/$NAME.zip" "$NAME")
+          fi
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mod-zip
+          path: out/*.zip
+          if-no-files-found: error
